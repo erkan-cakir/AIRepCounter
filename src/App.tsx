@@ -11,6 +11,7 @@ import {
 type PermissionState = "idle" | "requesting" | "granted" | "denied" | "unsupported";
 type DetectorPhase = "waiting" | "moving" | "blocked";
 type MovementClass = "tam" | "yarım" | "gürültü" | "geçersiz";
+type FeedbackKind = "rep" | "set";
 
 interface ExerciseOption {
   name: string;
@@ -61,6 +62,13 @@ interface SessionStats {
   fullCandidates: number;
   halfCandidates: number;
   rejected: number;
+}
+
+interface FeedbackSignal {
+  id: number;
+  kind: FeedbackKind;
+  title: string;
+  detail: string;
 }
 
 interface DetectorState {
@@ -158,6 +166,16 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)} sn`;
 }
 
+function formatSessionDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return hours > 0
+    ? `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`
+    : `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+}
+
 function csvValue(value: CsvRecord[keyof CsvRecord]): string {
   if (value === null || value === "") return "";
   const text = String(value);
@@ -220,6 +238,7 @@ function Sparkline({ values }: { values: number[] }) {
 }
 
 export default function App() {
+  const vibrationSupported = typeof navigator !== "undefined" && typeof navigator.vibrate === "function";
   const [permission, setPermission] = useState<PermissionState>("idle");
   const [permissionMessage, setPermissionMessage] = useState("Sensörleri kullanmak için izin verin.");
   const [exercise, setExercise] = useState(EXERCISES[0].name);
@@ -241,6 +260,9 @@ export default function App() {
   const [stats, setStats] = useState<SessionStats>(EMPTY_STATS);
   const [history, setHistory] = useState<MovementEvent[]>([]);
   const [statusMessage, setStatusMessage] = useState("Hazır");
+  const [vibrationEnabled, setVibrationEnabled] = useState(vibrationSupported);
+  const [feedback, setFeedback] = useState<FeedbackSignal | null>(null);
+  const [focusMode, setFocusMode] = useState(false);
 
   const exerciseRef = useRef(exercise);
   const placementRef = useRef(placement);
@@ -273,6 +295,9 @@ export default function App() {
   const candidateIdRef = useRef(0);
   const detectorRef = useRef<DetectorState | null>(null);
   const processAngleRef = useRef<(orientation: UnwrappedOrientation, now: number) => void>(() => undefined);
+  const vibrationEnabledRef = useRef(vibrationSupported);
+  const feedbackIdRef = useRef(0);
+  const feedbackTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     exerciseRef.current = exercise;
@@ -282,6 +307,15 @@ export default function App() {
   useEffect(() => {
     calibrationRef.current = calibration;
   }, [calibration]);
+
+  useEffect(() => {
+    vibrationEnabledRef.current = vibrationEnabled;
+  }, [vibrationEnabled]);
+
+  useEffect(() => {
+    document.body.classList.toggle("focus-mode-open", focusMode);
+    return () => document.body.classList.remove("focus-mode-open");
+  }, [focusMode]);
 
   const publishLiveValues = useCallback(() => {
     const now = performance.now();
@@ -399,6 +433,7 @@ export default function App() {
       detachSensors();
       if (calibrationTimeoutRef.current !== null) window.clearTimeout(calibrationTimeoutRef.current);
       if (calibrationIntervalRef.current !== null) window.clearInterval(calibrationIntervalRef.current);
+      if (feedbackTimeoutRef.current !== null) window.clearTimeout(feedbackTimeoutRef.current);
     };
   }, [detachSensors]);
 
@@ -471,6 +506,33 @@ export default function App() {
     }
   }
 
+  function signalAcceptedMovement(validTotal: number) {
+    const completedSet = validTotal <= 30 && validTotal % 10 === 0;
+    feedbackIdRef.current += 1;
+    setFeedback({
+      id: feedbackIdRef.current,
+      kind: completedSet ? "set" : "rep",
+      title: completedSet ? `${validTotal / 10}. set tamamlandı` : `${validTotal}. tekrar kabul edildi`,
+      detail: completedSet ? "10 geçerli tekrar tamamlandı" : "Tam hareket geçerli sayıldı",
+    });
+
+    if (feedbackTimeoutRef.current !== null) window.clearTimeout(feedbackTimeoutRef.current);
+    feedbackTimeoutRef.current = window.setTimeout(() => setFeedback(null), completedSet ? 1800 : 1100);
+
+    if (vibrationSupported && vibrationEnabledRef.current) {
+      navigator.vibrate(completedSet ? [140, 80, 140] : 80);
+    }
+  }
+
+  function toggleVibration() {
+    if (!vibrationSupported) return;
+    setVibrationEnabled((enabled) => {
+      const next = !enabled;
+      if (!next) navigator.vibrate(0);
+      return next;
+    });
+  }
+
   function recordMovement(
     className: MovementClass,
     angleDeg: number,
@@ -502,6 +564,7 @@ export default function App() {
     };
     setHistory((previousHistory) => [movement, ...previousHistory].slice(0, 40));
     setStatusMessage(accepted ? `Tam tekrar kabul edildi · ${next.valid}. geçerli tekrar` : reason);
+    if (accepted) signalAcceptedMovement(next.valid);
 
     const profile = calibrationRef.current;
     const row = emptyCsvRecord(exerciseRef.current, placementRef.current);
@@ -742,6 +805,13 @@ export default function App() {
     setHistory([]);
     candidateIdRef.current = 0;
     detectorRef.current = null;
+    setFocusMode(false);
+    setFeedback(null);
+    if (feedbackTimeoutRef.current !== null) {
+      window.clearTimeout(feedbackTimeoutRef.current);
+      feedbackTimeoutRef.current = null;
+    }
+    if (vibrationSupported) navigator.vibrate(0);
     setStatusMessage("Oturum sıfırlandı; Biceps kalibrasyonu korundu.");
   }
 
@@ -755,7 +825,7 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `repcounter_v0.4_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+    link.download = `repcounter_v0.5_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -785,9 +855,46 @@ export default function App() {
           : "Sensör izni ver";
 
   return (
-    <main className="app-shell">
+    <>
+      {feedback && (
+        <div key={feedback.id} className={`feedback-toast ${feedback.kind}`} role="status" aria-live="assertive">
+          <span aria-hidden="true">{feedback.kind === "set" ? "◆" : "✓"}</span>
+          <div>
+            <strong>{feedback.title}</strong>
+            <small>{feedback.detail}</small>
+          </div>
+        </div>
+      )}
+
+      {focusMode && (
+        <section className="focus-overlay" role="dialog" aria-modal="true" aria-label="Büyük sayaç odak modu">
+          <header className="focus-header">
+            <div>
+              <span className={`signal-dot ${signalFresh ? "active" : ""}`} />
+              {recording ? "Kayıt ve sensör akışı sürüyor" : "Kayıt duraklatıldı"}
+            </div>
+            <button className="focus-exit" type="button" onClick={() => setFocusMode(false)} autoFocus>
+              <span aria-hidden="true">×</span> Odaktan çık
+            </button>
+          </header>
+          <div key={feedback?.id ?? 0} className={`focus-counter-panel ${feedback ? `feedback-${feedback.kind}` : ""}`}>
+            <span className="focus-kicker">{goalCompleted ? "3 SET TAMAM" : `${Math.min(3, completedSets + 1)}. SET`}</span>
+            <strong className="focus-count">{currentSetProgress}</strong>
+            <span className="focus-target">/ 10</span>
+            <p>{stats.valid} toplam geçerli tekrar</p>
+          </div>
+          <div className="focus-stats">
+            <div><span>Set</span><strong>{completedSets}/3</strong></div>
+            <div><span>Yarım</span><strong>{stats.halfCandidates}</strong></div>
+            <div><span>Reddedilen</span><strong>{stats.rejected}</strong></div>
+            <div><span>Süre</span><strong>{formatSessionDuration(elapsedMs)}</strong></div>
+          </div>
+        </section>
+      )}
+
+      <main className="app-shell" aria-hidden={focusMode ? true : undefined}>
       <header className="hero">
-        <div className="version-pill">v0.4 · Akıllı Tekrar Doğrulama</div>
+        <div className="version-pill">v0.5 · Akıllı Tekrar Doğrulama</div>
         <h1>AI RepCounter</h1>
         <p>Telefon sensörleriyle kişisel hareket aralığını ölç, ham veriyi kaydet ve curl adaylarını incele.</p>
       </header>
@@ -823,6 +930,29 @@ export default function App() {
         </button>
         <p className="helper-text">{permissionMessage}</p>
         <p className="microcopy">iPhone Safari’de HTTPS ve düğmeye dokunma zorunludur. Ekran kilitlenirse sensör akışı durabilir.</p>
+        <div className="vibration-setting">
+          <div>
+            <strong>Titreşim geri bildirimi</strong>
+            <span>Geçerli tekrarda kısa, tamamlanan sette çift titreşim.</span>
+          </div>
+          <button
+            className={`switch-button ${vibrationEnabled && vibrationSupported ? "on" : ""}`}
+            type="button"
+            role="switch"
+            aria-checked={vibrationEnabled && vibrationSupported}
+            onClick={toggleVibration}
+            disabled={!vibrationSupported}
+          >
+            <span aria-hidden="true" />
+            {vibrationSupported ? (vibrationEnabled ? "Açık" : "Kapalı") : "Yok"}
+          </button>
+        </div>
+        {!vibrationSupported && (
+          <div className="compatibility-note" role="note">
+            <span aria-hidden="true">◌</span>
+            <p><strong>Görsel bildirim etkin.</strong> Bu tarayıcı titreşim API’sini sunmuyor; iOS Safari’de de desteklenmez. Geçerli tekrar ve setler ekranda gösterilir.</p>
+          </div>
+        )}
       </section>
 
       <section className="card">
@@ -955,6 +1085,27 @@ export default function App() {
         <p className="microcopy centered">Sıfırlama, oturum verisini ve sayaçları temizler; tamamlanmış Biceps kalibrasyonunu korur.</p>
       </section>
 
+      {sessionStarted && (
+        <section className={`card summary-card ${recording ? "live" : "finished"}`}>
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">{recording ? "CANLI ÖZET" : "OTURUM SONU"}</span>
+              <h2>Antrenman özeti</h2>
+            </div>
+            <span className={`state-chip ${recording ? "running" : "success"}`}>{recording ? "Sürüyor" : "Kaydedildi"}</span>
+          </div>
+          <dl className="summary-grid">
+            <div className="summary-exercise"><dt>Egzersiz</dt><dd>{exercise}</dd></div>
+            <div><dt>Geçerli</dt><dd>{stats.valid}</dd></div>
+            <div><dt>Yarım</dt><dd>{stats.halfCandidates}</dd></div>
+            <div><dt>Reddedilen</dt><dd>{stats.rejected}</dd></div>
+            <div><dt>Set</dt><dd>{isBiceps ? `${completedSets}/3` : "—"}</dd></div>
+            <div><dt>Süre</dt><dd>{formatSessionDuration(elapsedMs)}</dd></div>
+          </dl>
+          {!recording && <p className="summary-note">Özet, kaydı durdurduktan sonra ekranda kalır. Yeni oturum için “Sıfırla”yı kullanın.</p>}
+        </section>
+      )}
+
       {isBiceps && (
         <section className="card validation-card">
           <div className="section-heading">
@@ -982,6 +1133,10 @@ export default function App() {
               </div>
             </div>
           </div>
+
+          <button className="focus-button" type="button" onClick={() => setFocusMode(true)} disabled={!sessionStarted}>
+            <span aria-hidden="true">⛶</span> Büyük sayaç odak modunu aç
+          </button>
 
           <div className="metric-grid three-columns">
             <div className="metric-box compact accepted">
@@ -1066,9 +1221,10 @@ export default function App() {
       </section>
 
       <footer>
-        <strong>AI RepCounter v0.4</strong>
+        <strong>AI RepCounter v0.5</strong>
         <span>Deneysel araştırma prototipi · Tıbbi veya profesyonel antrenör değerlendirmesi değildir.</span>
       </footer>
-    </main>
+      </main>
+    </>
   );
 }

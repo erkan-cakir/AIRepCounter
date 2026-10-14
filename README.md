@@ -1,8 +1,8 @@
-# AI RepCounter v0.4
+# AI RepCounter v0.5
 
 Mobil tarayıcı hareket ve yön sensörleriyle ham veri toplayan React/TypeScript Vite PWA prototipi.
 
-## v0.4 kapsamı
+## v0.5 kapsamı
 
 - iPhone Safari için kullanıcı etkileşimli `DeviceMotion` ve `DeviceOrientation` izni
 - Ham ivme, dönüş hızı ve yönelim verisinin CSV kaydı
@@ -11,6 +11,9 @@ Mobil tarayıcı hareket ve yön sensörleriyle ham veri toplayan React/TypeScri
 - Tam/yarım hareket adaylarının ayrı sayılması
 - Açı, süre, karar ve kabul gerekçeli hareket günlüğü
 - Her 10 geçerli tekrar için 1 set ve 3 set hedefi
+- Destekleyen cihazlarda açılıp kapatılabilen tekrar/set titreşimi; iOS Safari için görsel geri bildirim
+- Kayıt durduktan sonra da kalan egzersiz, tekrar, set ve süre özeti
+- Sensör akışını kesmeden çalışan mobil büyük sayaç odak modu
 - Diğer dört egzersizde yalnızca veri toplama modu
 - PWA manifesti ve çevrimdışı uygulama kabuğu
 
